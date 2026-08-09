@@ -121,14 +121,29 @@ def mac(pattern, filter_matrix):
     return total
 
 
+def tie_tolerance(score_a, score_b):
+    """두 점수를 동점으로 볼 허용 오차를 계산한다.
+
+    부동소수점 오차는 값이 커질수록 함께 커진다.
+    0.1 근처에서는 1e-17 수준이지만, 100000 근처에서는 1e-11 수준까지 벌어진다.
+    그래서 고정값 EPSILON 만 쓰면 큰 점수에서는 오차가 허용치를 넘어
+    사실상 같은 값을 서로 다르다고 판정할 수 있다.
+
+    점수 크기에 비례해 허용 오차를 키우면 두 구간 모두 안전하다.
+    max(1.0, ...) 을 두어 점수가 0 에 가까울 때는 기존 EPSILON 을 그대로 쓴다.
+    """
+    return EPSILON * max(1.0, abs(score_a), abs(score_b))
+
+
 def decide(score_cross, score_x):
     """두 점수를 비교해 판정 결과를 돌려준다.
 
     부동소수점 오차 때문에 '수학적으로 같은 값'도 미세하게 다르게 계산될 수 있다.
-    그래서 단순히 > 로 비교하지 않고, 차이가 EPSILON 보다 작으면 동점으로 본다.
+    그래서 단순히 > 로 비교하지 않고, 차이가 허용 오차보다 작으면 동점으로 본다.
+    허용 오차는 점수 크기에 맞춰 tie_tolerance() 가 계산한다.
     동점이면 어느 쪽이라고 단정할 수 없으므로 UNDECIDED 를 돌려준다.
     """
-    if abs(score_cross - score_x) < EPSILON:
+    if abs(score_cross - score_x) < tie_tolerance(score_cross, score_x):
         return LABEL_UNDECIDED
     return LABEL_CROSS if score_cross > score_x else LABEL_X
 
@@ -136,36 +151,53 @@ def decide(score_cross, score_x):
 # ---------------------------------------------------------------------------
 # 성능 측정
 # ---------------------------------------------------------------------------
-def measure_mac_ms(pattern, filter_matrix, repeat=REPEAT):
-    """MAC 연산을 repeat 회 반복 실행하고 1회당 평균 시간(ms)을 돌려준다.
+def measure_mac_stats(pattern, filter_matrix, repeat=REPEAT):
+    """MAC 연산을 repeat 회 반복하고 (평균, 최소, 최대) 시간(ms)을 돌려준다.
 
     파일 읽기나 화면 출력 시간이 섞이지 않도록,
     mac() 호출 직전과 직후만 측정한다.
     time.perf_counter() 는 시스템 시계 변경에 영향받지 않는 고해상도 타이머다.
+
+    평균만 보면 다른 프로그램 때문에 한 번 크게 튄 값이 가려진다.
+    최소/최대를 함께 보면 측정값이 얼마나 흔들렸는지 알 수 있고,
+    최소값은 방해가 가장 적었던 실행이라 순수 연산 시간에 가장 가깝다.
     """
-    total_seconds = 0.0
+    samples_ms = []
     for _ in range(repeat):
         start = time.perf_counter()
         mac(pattern, filter_matrix)
-        total_seconds += time.perf_counter() - start
-    return (total_seconds / repeat) * 1000.0
+        samples_ms.append((time.perf_counter() - start) * 1000.0)
+    return sum(samples_ms) / repeat, min(samples_ms), max(samples_ms)
+
+
+def measure_mac_ms(pattern, filter_matrix, repeat=REPEAT):
+    """MAC 연산 1회당 평균 시간(ms)만 돌려준다."""
+    average_ms, _, _ = measure_mac_stats(pattern, filter_matrix, repeat)
+    return average_ms
 
 
 def print_performance_table(entries):
-    """크기별 평균 연산 시간과 연산 횟수를 표로 출력한다.
+    """크기별 연산 시간(평균/최소/최대)과 연산 횟수를 표로 출력한다.
 
     entries: [(N, 패턴, 필터), ...]
     """
-    print("\n" + "-" * 46)
+    print("\n" + "-" * 66)
     print(f"# 성능 분석 (평균 / {REPEAT}회 반복)")
-    print("-" * 46)
-    print(f"{'크기':<10}{'평균 시간(ms)':>16}{'연산 횟수(N^2)':>18}")
-    print("-" * 46)
+    print("-" * 66)
+    header = (
+        f"{'크기':<8}{'평균(ms)':>12}{'최소(ms)':>12}"
+        f"{'최대(ms)':>12}{'연산 횟수(N^2)':>18}"
+    )
+    print(header)
+    print("-" * 66)
     for n, pattern, filter_matrix in entries:
-        avg_ms = measure_mac_ms(pattern, filter_matrix)
+        average_ms, min_ms, max_ms = measure_mac_stats(pattern, filter_matrix)
         label = f"{n}x{n}"
-        print(f"{label:<10}{avg_ms:>16.4f}{n * n:>18}")
-    print("-" * 46)
+        print(
+            f"{label:<8}{average_ms:>12.4f}{min_ms:>12.4f}"
+            f"{max_ms:>12.4f}{n * n:>18}"
+        )
+    print("-" * 66)
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +292,8 @@ def run_manual_mode():
 
     verdict = decide(score_a, score_b)
     if verdict == LABEL_UNDECIDED:
-        print(f"판정: 판정 불가 (|A-B| < {EPSILON})")
+        # 허용 오차는 점수 크기에 따라 달라지므로 실제 적용된 값을 보여준다.
+        print(f"판정: 판정 불가 (|A-B| < {tie_tolerance(score_a, score_b)})")
     elif verdict == LABEL_CROSS:
         print("판정: A")
     else:
